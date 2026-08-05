@@ -1,0 +1,14 @@
+.idea/
+.gradle/
+build/
+*.iml
+*.tflite
+*.onnx
+*.pt
+*.pth
+*.wav
+*.pcm
+*.json
+local.properties
+keystore.properties
+*.jks
