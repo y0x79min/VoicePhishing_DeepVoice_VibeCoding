@@ -5,8 +5,8 @@ import com.y0x79min.voiceguard.analysis.DeepVoiceAnalyzer;
 import java.io.File;
 
 /**
- * 발표자료의 통화 상태 변경 및 saveRecordingSnapshot 흐름을 의존성 인터페이스로 분리했습니다.
- * Android Service, MediaRecorder, Vosk, 서버 문맥 모델과 UI 구현은 공개 범위에서 제외합니다.
+ * 녹음 스냅샷 하나를 딥보이스 분석과 보이스피싱 문맥 분석으로 나누고,
+ * 경고 UI 및 통화 기록까지 연결하는 Android 앱의 중심 흐름입니다.
  */
 public final class CallAnalysisCoordinator {
     private final AudioSnapshotWriter snapshotWriter;
@@ -37,15 +37,27 @@ public final class CallAnalysisCoordinator {
         this.warningUi = warningUi;
     }
 
-    public void onCallStarted(String phoneNumber, String recordingFilePath) throws Exception {
-        loadOrCreateCallLog();
-        createNewCallRecord(phoneNumber, recordingFilePath);
-        startRecording();
+    public synchronized void onCallStarted(String phoneNumber, String recordingFilePath)
+            throws Exception {
+        if (currentRecord != null) {
+            throw new IllegalStateException("이미 통화 분석이 진행 중입니다.");
+        }
+        callLogStore.loadOrCreate();
+        currentRecord = new CallLogRecord(
+                phoneNumber,
+                recordingFilePath,
+                System.currentTimeMillis()
+        );
+        snapshotWriter.startRecording();
         warningUi.showOverlay();
     }
 
     /** 통화 중 5초마다, 그리고 통화 종료 직전에 한 번 더 호출합니다. */
-    public void saveRecordingSnapshot() throws Exception {
+    public synchronized void saveRecordingSnapshot() throws Exception {
+        if (currentRecord == null) {
+            return;
+        }
+
         File wavFile = snapshotWriter.saveCurrentSnapshotAsWav();
 
         float[][][] input = featureExtractor.preprocess(wavFile);
@@ -73,31 +85,41 @@ public final class CallAnalysisCoordinator {
         callLogStore.save(currentRecord);
     }
 
-    public void onCallEnded(String duration) throws Exception {
-        saveRecordingSnapshot();
-        currentRecord.updateDuration(duration);
-        callLogStore.save(currentRecord);
-        snapshotWriter.stopRecording();
-        warningUi.hideOverlay();
-    }
+    public synchronized void onCallEnded(String duration) throws Exception {
+        if (currentRecord == null) {
+            return;
+        }
 
-    private void loadOrCreateCallLog() throws Exception {
-        callLogStore.loadOrCreate();
-    }
+        Exception failure = null;
+        try {
+            saveRecordingSnapshot();
+            currentRecord.updateDuration(duration);
+            callLogStore.save(currentRecord);
+        } catch (Exception error) {
+            failure = error;
+        }
 
-    private void createNewCallRecord(String phoneNumber, String recordingFilePath) {
-        currentRecord = new CallLogRecord(phoneNumber, recordingFilePath, System.currentTimeMillis());
-    }
+        try {
+            snapshotWriter.stopRecording();
+        } catch (Exception stopError) {
+            if (failure == null) {
+                failure = stopError;
+            } else {
+                failure.addSuppressed(stopError);
+            }
+        } finally {
+            warningUi.hideOverlay();
+            currentRecord = null;
+        }
 
-    private void startRecording() throws Exception {
-        snapshotWriter.startRecording();
+        if (failure != null) {
+            throw failure;
+        }
     }
 
     public interface AudioSnapshotWriter {
         void startRecording() throws Exception;
-
         File saveCurrentSnapshotAsWav() throws Exception;
-
         void stopRecording() throws Exception;
     }
 
@@ -107,35 +129,26 @@ public final class CallAnalysisCoordinator {
 
     public interface SpeechToText {
         void reset();
-
         String recognize(File wavFile) throws Exception;
     }
 
     public interface VoicePhishingAnalyzer {
         float analyze(String text) throws Exception;
-
         boolean isWarning(float probability);
     }
 
     public interface CallLogStore {
         void loadOrCreate() throws Exception;
-
         void save(CallLogRecord record) throws Exception;
     }
 
     public interface WarningUi {
         void showOverlay();
-
         void hideOverlay();
-
         void showDeepVoiceProbability(float probability);
-
         void showVoicePhishingProbability(float probability);
-
         void showDeepVoiceWarning();
-
         void showVoicePhishingWarning();
-
         void vibrate();
     }
 }
